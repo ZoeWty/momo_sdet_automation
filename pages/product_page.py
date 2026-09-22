@@ -45,11 +45,22 @@ class ProductPage:
         return name.inner_text().strip(), price.inner_text().strip()
 
     def _storefront_content(self) -> tuple[str, str]:
-        expect(self.page.locator("main:visible")).to_be_visible(
+        # Measured against a real TP page on 2026-09-22: there is no <main>
+        # element on it at all, so the previous `main:visible` gate could only
+        # ever time out -- this branch could not have passed. The name also
+        # came from a hidden `meta[property='og:title']`, which proves the
+        # metadata exists, not that a shopper can read the name. Both now use
+        # the visible storefront DOM.
+        expect(self.page.locator(".goods-detail-right")).to_be_visible(
             timeout=CONTENT_TIMEOUT_MS
         )
-        name = self.page.locator("meta[property='og:title']")
-        price = self.page.locator(".goods-detail-price:visible")
-        expect(name).to_have_count(1)
+        # The title block also carries a promo line, a coupon badge and the
+        # 品號. It is the smallest *semantically named* visible node that is
+        # guaranteed to contain the product name; the inner node holding only
+        # the name is addressed purely by utility classes and would be far
+        # more brittle.
+        name = self.page.locator(".goods-detail-title-wrapper")
+        price = self.page.locator(".goods-detail-price")
+        expect(name).to_be_visible()
         expect(price).to_be_visible()
-        return (name.get_attribute("content") or "").strip(), price.inner_text().strip()
+        return name.inner_text().strip(), price.inner_text().strip()

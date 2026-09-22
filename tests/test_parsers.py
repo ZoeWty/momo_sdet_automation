@@ -136,13 +136,19 @@ def test_assert_disjoint_passes_for_distinct_pages():
     assert_disjoint([product(i_code="1")], [product(i_code="2")], label="p1/p2")
 
 
-def test_assert_disjoint_names_the_repeated_products():
+def test_assert_disjoint_rejects_product_route_aliases():
+    source = product(i_code="15687251")
+    alias = Product(
+        name="耳機",
+        raw_price="100",
+        price=100,
+        href="https://www.momoshop.com.tw/product/15687251",
+        identity=parse_product_identity(
+            "https://www.momoshop.com.tw/product/15687251"
+        ),
+    )
     with pytest.raises(AssertionError, match="repeated"):
-        assert_disjoint(
-            [product(i_code="1"), product(i_code="2")],
-            [product(i_code="2")],
-            label="p1/p2",
-        )
+        assert_disjoint([source], [alias], label="p1/p2")
 
 
 # ── product URL identity ─────────────────────────────────────────────────

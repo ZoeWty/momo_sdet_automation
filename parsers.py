@@ -25,6 +25,18 @@ class ProductIdentity:
     value: str
     storefront: str | None = None
 
+    @property
+    def key(self) -> tuple[str, str, str | None]:
+        """The product this URL points at, ignoring which route it came through.
+
+        `family` is kept on the dataclass for diagnostics but must never take
+        part in an identity comparison: momo serves the same product as both
+        `GoodsDetail.jsp?i_code=N` and `/product/N`, so comparing the whole
+        dataclass would treat one product seen through two routes as two
+        products -- and a cross-page duplicate would slip through.
+        """
+        return (self.namespace, self.value, self.storefront)
+
 
 @dataclass(frozen=True)
 class Product:
@@ -73,12 +85,8 @@ def parse_product_identity(url: str) -> ProductIdentity:
 
 
 def same_product(source: ProductIdentity, destination: ProductIdentity) -> bool:
-    """Compare known route aliases without discarding their URL family."""
-    return (
-        source.namespace == destination.namespace
-        and source.value == destination.value
-        and source.storefront == destination.storefront
-    )
+    """True when both URLs point at the same product, whatever route they use."""
+    return source.key == destination.key
 
 
 def build_products(raw_cards: Sequence[Mapping[str, object]]) -> list[Product]:
@@ -174,7 +182,10 @@ def assert_disjoint(first: Sequence[Product], second: Sequence[Product], *, labe
     creative legitimately reappears across pages, so an unfiltered comparison
     reports momo's normal behaviour as a defect.
     """
-    left = {product.identity for product in first}
-    right = {product.identity for product in second}
+    # Compare on identity.key, not the whole dataclass: the same product can
+    # appear on two pages under two different URL families, and comparing
+    # `family` too would let that duplicate pass.
+    left = {product.identity.key for product in first}
+    right = {product.identity.key for product in second}
     overlap = left & right
-    assert not overlap, f"{label}: {len(overlap)} organic product(s) repeated: {overlap!r}"
+    assert not overlap, f"{label}: {len(overlap)} organic product(s) repeated: {sorted(overlap)!r}"

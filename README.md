@@ -1,9 +1,9 @@
 # momo Search UI Automation
 
 Playwright + pytest against momo's **production** site. No mocks, no route
-interception, no response rewriting — the suite is closer to a synthetic
-monitor than to a conventional E2E suite, and every design choice below
-follows from that.
+interception, no response rewriting. It validates a real end-to-end user
+journey and can later be used as a synthetic check; every design choice below
+follows from testing a live site we do not control.
 
 ## What this submission verifies
 
@@ -13,10 +13,12 @@ follows from that.
 | UI executions | 12 | ~80 s | yes (live site) |
 | of which P0 smoke | 7 | ~45 s | yes |
 
-**Stability evidence:** three consecutive full runs on 2026-09-22 —
-`48 passed` / `48 passed` / `48 passed`, 72–82 s each, **zero retries and
-zero reruns**. Samples from one machine on one day, not a guarantee; the CI
-table below covers a different machine, geography and interpreter.
+**Stability evidence:** five consecutive full runs on 2026-09-22 — `48
+passed` each, 70–82 s each, with zero pytest reruns. The price-panel action
+may be re-issued up to four times when momo drops a press; that is a bounded
+interaction recovery, not a runner retry. Samples from one machine on one
+day, not a guarantee; the CI table below covers a different machine,
+geography and interpreter.
 
 ## Setup
 
@@ -51,14 +53,16 @@ python -m pytest
 ```
 
 Add `--headed` for a live demo. Defaults are Chromium, a single worker and
-zero retries. The site under test is not hardcoded — switch it without
-touching code:
+zero pytest reruns. The production origin is the intended target; `--base-url`
+overrides the starting origin for diagnostics, while product-identity
+validation deliberately accepts momo's public host only:
 
 ```bash
 python -m pytest --base-url https://www.momoshop.com.tw/
 PYTEST_BASE_URL=https://www.momoshop.com.tw/ python -m pytest
 ```
- Failures keep a screenshot and a trace under `test-results/`:
+
+Failures keep a screenshot and a trace under `test-results/`:
 
 ```bash
 python -m playwright show-trace test-results/<trace-file>.zip
@@ -72,8 +76,8 @@ python -m playwright show-trace test-results/<trace-file>.zip
 | `MM-FH-02` | P0 | A→B query change inside one tab leaves no state from A |
 | `MM-FH-03` ×2 | P0 | Price ascending and descending are actually ordered, **after ads are excluded** |
 | `MM-FH-04` | P0 | A price range holds across pagination, and the two pages share **no** organic product |
-| `MM-FH-05` | P1 | Clearing the range restores an unfiltered result set |
-| `MM-FH-06` | P1 | A result card hands off to the same product, across momo's three URL families |
+| `MM-FH-05` | P1 | Clearing the range sends a clear request and restores a visible product outside the former range |
+| `MM-FH-06` | P1 | A result card hands off to the same product; helper tests recognize momo's three URL families |
 | `MM-FH-07` | P1 | Price order **continues across a page boundary** — a defect no single-page assertion can see |
 | `MM-FN-01` | P0 | No-result state renders, and the page recovers to a normal search |
 | `MM-FE-01` ×2 | P1 | Filter→sort and sort→filter end in the same state |
@@ -101,27 +105,37 @@ tests, because every other assertion depends on it being right.
 **The 1440×900 viewport is a functional precondition, not styling.** Below
 roughly 1024px momo serves a different component tree (`ul.goods-mobile-panel`
 instead of `ul.listAreaUl`) and every selector here resolves to nothing.
-`SearchPage.open()` asserts the width up front so the failure names the cause.
+Both `SearchPage.open()` and `SearchPage.open_results()` assert the width up
+front so the failure names the cause.
 
 **Only the tests whose subject is the search box go through the home page.**
 The rest deep-link into the result page. After a client-side search the result
 page is a soft navigation and the price control loses roughly one interaction
 in three; a full document load does not.
 
-**The price panel is re-issued until the result set changes.** momo's 確認
-control drops interactions while the list is still re-rendering. The fix is a
-stability gate (`_wait_until_results_settle`) plus a bounded re-issue. This
-retries an *interaction*, never an assertion — every range, ordering and URL
-claim still has to hold on its first look, so no product defect can be hidden.
+**The price panel waits for a proven apply, then for a settled list.** momo's
+確認 control can drop an interaction while the list is still re-rendering, or
+send only one bound. `_wait_until_results_settle()` runs before the bounded
+attempt loop; success requires an outgoing request carrying both requested bounds
+(or neither when clearing). `_wait_for_list_change()` then waits until the
+organic-card fingerprint changes and holds for 400 ms, preventing an ad refresh
+from masquerading as a completed filter update. Sorting waits until the visible
+organic prices follow the requested direction; pagination waits until the
+organic content changes. The range URL parameters and the input values are
+deliberately not asserted: momo sometimes omits or clears that chrome after a
+correct apply. The caller instead asserts the visible organic prices.
 
-**Relevance is gated at 70%, not 100%.** Measured 2026-09-22: 耳機 scored
-24/24 but 咖啡 scored 22/24, and both misses were correct behaviour — 「珈琲豆」
-is a variant spelling and 「二合一」 is instant coffee. A 100% gate would fail
-the product for working properly. The gate exists to catch a collapsed ranker.
+**Relevance is a collapse canary at 50%, not a relevance metric.** Measured
+2026-09-22: 耳機 scored 24/24 but 咖啡 scored 22/24, and both misses were
+correct behaviour — 「珈琲豆」 is a variant spelling and 「二合一」 is instant
+coffee. The floor sits far below the worst measured value so a synonym-heavy
+result set can never block a submission; it fires only when the ranker has
+stopped working. What it cannot do is detect subtler degradation — see
+*Known limits*.
 
 **No `sleep`, no blanket reruns, no `networkidle`.** Ad and tracking requests
-mean the network never goes idle. Every wait is a bounded condition on
-something the user can see.
+mean the network never goes idle. Every wait has a bounded, operation-specific
+completion condition.
 
 ## CI
 
@@ -154,3 +168,14 @@ is not tuned to one laptop's timing, one interpreter or one network path.
 - `MM-FH-06` exercises one product's URL family per run. The helpers cover
   `GoodsDetail.jsp`, the `/product/{id}` alias and `/TP/.../goodsDetail/...`
   identity parsing; the suite does not claim all three page types ran E2E.
+  The storefront (`/TP/...`) branch of `ProductPage` was verified by hand
+  against a live TP page on 2026-09-22 but has not yet been reached by a run,
+  because the first organic result has always been a catalog product.
+- The relevance canary only counts literal keyword matches in product names.
+  A catalogue that stuffed keywords into every title would satisfy it while
+  relevance actually degraded. Catching that needs a hand-labelled query set
+  with expected results, which is out of scope here.
+- Cross-page assertions (`MM-FH-04` disjointness, `MM-FH-07` ordering across a
+  page boundary) assume the result set is not re-ranked between the two page
+  loads. momo gives no snapshot or stable secondary sort, so these are strong
+  diagnostics rather than unconditional invariants.

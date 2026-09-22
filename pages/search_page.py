@@ -19,7 +19,7 @@ RESULTS_PATH = "search/{keyword}?searchType=1&curPage=1&viewport=desktop&_isFuzz
 RESULT_TIMEOUT_MS = 30_000
 NAVIGATION_TIMEOUT_MS = 60_000
 PRICE_COMMIT_ATTEMPTS = 4
-PRICE_COMMIT_TIMEOUT_MS = 12_000
+PRICE_COMMIT_TIMEOUT_MS = 6_000
 
 # momo serves a different component tree to narrow viewports: below roughly
 # 1024px the result list is `ul.goods-mobile-panel` and `ul.listAreaUl` does
@@ -28,6 +28,25 @@ PRICE_COMMIT_TIMEOUT_MS = 12_000
 # not a cosmetic choice. Overriding it makes every locator here resolve to
 # nothing; build_products() says so in its failure message.
 MIN_DESKTOP_WIDTH = 1024
+
+# One definition of the organic content currently on screen. Ads are excluded
+# because their refresh must never prove that search results changed.
+# Href/name/price keep the fingerprint useful even when viewProdId is absent.
+_FINGERPRINT_EXPR = (
+    "(() => {"
+    "  const vis = e => Boolean(e && (e.offsetWidth || e.offsetHeight || e.getClientRects().length));"
+    "  const list = [...document.querySelectorAll('ul.listAreaUl')].find(vis);"
+    "  return list"
+    "    ? [...list.querySelectorAll(':scope > li')]"
+    "        .filter(card => !card.querySelector('.sponsor-tag, ins.tenMaxAdTag'))"
+    "        .map(card => ["
+    "          card.querySelector('a.prdName')?.href || '',"
+    "          card.querySelector('a.prdName')?.textContent?.trim() || '',"
+    "          card.querySelector('.price')?.textContent?.trim() || ''"
+    "        ].join('\\u001f')).join('\\u001e')"
+    "    : '';"
+    "})()"
+)
 
 
 class SearchPage:
@@ -210,6 +229,7 @@ class SearchPage:
             next_code = self._request_params(request)["searchType"]
             expected = {**retained, "searchType": next_code}
             self._finish_update(self.query_from_url(), expected, set())
+            self._wait_for_price_order(descending=next_code == "3")
 
         assert self.url_params().get("searchType") == target, (
             f"price sort did not reach searchType={target} after two toggles"
@@ -224,77 +244,90 @@ class SearchPage:
         keyword = self.query_from_url()
         sort = self.url_params().get("searchType", "1")
         self._commit_price_panel(str(minimum), str(maximum), label=f"apply {minimum}-{maximum}")
-        self._finish_update(
-            keyword,
-            {"searchType": sort, "_advPriceS": str(minimum), "_advPriceE": str(maximum)},
-            set(),
-        )
-        self.assert_price_filter_state(minimum, maximum)
+        # Only the sort is required to survive in the address bar. Measured
+        # 2026-09-22: after a correct apply the URL gained _advPriceS in 3 of 4
+        # runs and the range inputs were sometimes left empty, even though the
+        # result set was filtered correctly every time. Those two are momo's
+        # own chrome, not a contract. The range itself is proved by the request
+        # _commit_price_panel insists on, plus the prices the caller asserts.
+        self._finish_update(keyword, {"searchType": sort}, set())
 
     def clear_price_filter(self) -> None:
         keyword = self.query_from_url()
         sort = self.url_params().get("searchType", "1")
         self._commit_price_panel("", "", label="clear")
         self._finish_update(keyword, {"searchType": sort}, {"_advPriceS", "_advPriceE"})
-        expect(self.price_min_input).to_have_value("")
-        expect(self.price_max_input).to_have_value("")
 
     def _commit_price_panel(self, low: str, high: str, *, label: str) -> None:
-        """Fill the range and press 確認 until the result set actually changes.
+        """Re-issue the range until the request leaving the browser carries it.
 
-        momo's price panel drops interactions: across repeated runs on
-        2026-09-22 an identical 確認 click produced the RSC request carrying
-        the new range only part of the time — sometimes no request at all,
-        sometimes one still carrying the previous parameters. Waiting longer
-        never recovers a lost click, so the whole interaction (fill + press)
-        is re-issued instead.
+        Two separate momo behaviours make this necessary, both measured on
+        2026-09-22:
 
-        This retries an *interaction*, not an assertion. Every range, ordering
-        and URL assertion downstream still has to hold on its first look, so
-        a real product defect cannot be papered over here. When the control
-        never takes effect the failure names the attempt count and the
-        unchanged page summary rather than surfacing a bare timeout.
+        * A press is sometimes dropped entirely -- no request at all -- while
+          the list is still re-rendering. Waiting longer never recovers a lost
+          press, so the whole interaction (fill + press) is re-issued.
+        * A press sometimes sends a *partial* range. One observed request
+          carried only `_advPriceE=2000` and dropped the floor. The result
+          count still changed, so any success condition based on "the page
+          changed" accepts that half-applied filter -- and the page then
+          showed $473 under a $1000 floor. That is the bug this method used
+          to have.
+
+        Success is therefore the request itself, never a side effect of it.
+
+        This retries an *interaction*, never an assertion: every range and
+        ordering claim downstream still has to hold on its first look, so a
+        real product defect cannot be papered over here.
         """
+        keyword = self.query_from_url()
+        if low or high:
+            expected: dict[str, str] = {"_advPriceS": low, "_advPriceE": high}
+            forbidden: set[str] = set()
+        else:
+            expected, forbidden = {}, {"_advPriceS", "_advPriceE"}
+
         self._wait_until_results_settle()
-        before = self._page_summary()
-        for attempt in range(1, PRICE_COMMIT_ATTEMPTS + 1):
+        for _ in range(PRICE_COMMIT_ATTEMPTS):
+            stale = self._list_fingerprint()
             self._type_range(low, high)
-            self.price_confirm_button.click()
             try:
-                self.page.wait_for_function(
-                    """before => {
-                      const summaries = [...document.querySelectorAll('span.page-number')]
-                        .map(node => node.textContent.trim())
-                        .filter(Boolean);
-                      return summaries.length > 0 && summaries[0] !== before;
-                    }""",
-                    arg=before,
+                with self.page.expect_request(
+                    lambda request: self._request_matches(
+                        request, keyword, expected, forbidden
+                    ),
                     timeout=PRICE_COMMIT_TIMEOUT_MS,
-                )
-                return
+                ):
+                    self.price_confirm_button.click()
             except PlaywrightTimeoutError:
                 continue
+            # The request proves the range was dispatched; the cards still lag
+            # it and arrive over more than one paint, so a read taken now can
+            # mix the old and new result sets (measured: 14 of 30 cards from
+            # the previous set). Wait for the list to actually turn over.
+            self._wait_for_list_change(stale)
+            return
         raise AssertionError(
-            f"price panel ({label}) did not take effect after {PRICE_COMMIT_ATTEMPTS} "
-            f"attempts; page summary stayed {before!r}"
+            f"price panel ({label}) never dispatched a request carrying the exact "
+            f"range after {PRICE_COMMIT_ATTEMPTS} attempts; wanted "
+            f"{expected or 'no range parameters'}"
         )
 
     def _wait_until_results_settle(self) -> None:
         """Wait for the result summary to hold still before touching a control.
 
-        The list re-renders while sponsored slots resolve, and the filter
-        panel re-renders with it. Acting during that window is what loses the
-        interaction. This is a stability condition, not a sleep: it returns as
-        soon as the summary stops changing.
+        The list re-renders while sponsored slots resolve, and the filter panel
+        re-renders with it; acting inside that window is what loses a press.
+        A stability condition, not a sleep: it returns as soon as the summary
+        stops changing. Markers are cleared first so a previous timeout cannot
+        let the next call finish early.
         """
+        self.page.evaluate("() => { delete window.__momoSettle; delete window.__momoSettleAt; }")
         self.page.wait_for_function(
             """() => {
-              const read = () => {
-                const nodes = [...document.querySelectorAll('span.page-number')]
-                  .map(node => node.textContent.trim()).filter(Boolean);
-                return nodes[0] || '';
-              };
-              const now = read();
+              const nodes = [...document.querySelectorAll('span.page-number')]
+                .map(node => node.textContent.trim()).filter(Boolean);
+              const now = nodes[0] || '';
               if (!now) return false;
               if (window.__momoSettle !== now) {
                 window.__momoSettle = now;
@@ -305,16 +338,14 @@ class SearchPage:
             }""",
             timeout=RESULT_TIMEOUT_MS,
         )
-        self.page.evaluate("() => { delete window.__momoSettle; delete window.__momoSettleAt; }")
 
     def _type_range(self, low: str, high: str) -> None:
         """Enter the range with real key events.
 
         fill() writes the DOM value in one shot; momo's inputs are React
         controlled, and a 確認 press that follows too closely was observed
-        submitting the *previous* range — the RSC request went out with no
-        _advPrice parameters at all. Typing character by character and then
-        blurring gives the component the input/change events it listens for.
+        submitting the *previous* range. Typing character by character and
+        then blurring gives the component the events it listens for.
         """
         for field, value in ((self.price_min_input, low), (self.price_max_input, high)):
             field.click()
@@ -326,20 +357,54 @@ class SearchPage:
             expect(field).to_have_value(value)
         self.price_max_input.blur()
 
-    def _page_summary(self) -> str:
-        """First non-empty '頁數N/M' label, used as a cheap result-set fingerprint."""
-        texts = self.page.locator("span.page-number").all_inner_texts()
-        return next((text.strip() for text in texts if text.strip()), "")
+    def _list_fingerprint(self) -> str:
+        """Visible organic result content, in order. Empty string if none."""
+        return self.page.evaluate("() => " + _FINGERPRINT_EXPR)
 
-    def assert_price_filter_state(self, minimum: int, maximum: int) -> None:
-        expect(self.price_min_input).to_have_value(str(minimum))
-        expect(self.price_max_input).to_have_value(str(maximum))
-        params = self.url_params()
-        assert params.get("_advPriceS") == str(minimum)
-        assert params.get("_advPriceE") == str(maximum)
+    def _wait_for_list_change(self, stale: str) -> None:
+        """Block until the organic result content differs from `stale` and holds still."""
+        self.page.evaluate("() => { delete window.__momoList; delete window.__momoListAt; }")
+        self.page.wait_for_function(
+            "stale => {"
+            "  const now = " + _FINGERPRINT_EXPR + ";"
+            "  if (now === stale) return false;"
+            "  if (window.__momoList !== now) {"
+            "    window.__momoList = now; window.__momoListAt = Date.now(); return false;"
+            "  }"
+            "  return Date.now() - window.__momoListAt >= 400;"
+            "}",
+            arg=stale,
+            timeout=RESULT_TIMEOUT_MS,
+        )
+
+    def _wait_for_price_order(self, *, descending: bool) -> None:
+        """Wait until the visible organic prices satisfy the requested order."""
+        self.page.wait_for_function(
+            """descending => {
+              const visible = element => Boolean(
+                element && (element.offsetWidth || element.offsetHeight || element.getClientRects().length)
+              );
+              const list = [...document.querySelectorAll('ul.listAreaUl')].find(visible);
+              if (!list) return false;
+              const texts = [...list.querySelectorAll(':scope > li')]
+                .filter(card => !card.querySelector('.sponsor-tag, ins.tenMaxAdTag'))
+                .map(card => card.querySelector('.price')?.textContent?.trim() || '');
+              const prices = texts.map(text => {
+                const match = text.match(/^(0|[1-9]\\d*|[1-9]\\d{0,2}(?:,\\d{3})+)(?:起)?$/);
+                return match ? Number(match[1].replaceAll(',', '')) : NaN;
+              });
+              if (prices.length < 2 || prices.some(Number.isNaN)) return false;
+              return prices.every((price, index) => index === 0 || (
+                descending ? prices[index - 1] >= price : prices[index - 1] <= price
+              ));
+            }""",
+            arg=descending,
+            timeout=RESULT_TIMEOUT_MS,
+        )
 
     def go_to_page(self, page_number: int) -> None:
         expect(self.visible_pagination).to_have_count(1)
+        stale = self._list_fingerprint()
         link = self.visible_pagination.locator("a.pagination-link").filter(
             has_text=re.compile(rf"^{page_number}$")
         )
@@ -355,6 +420,7 @@ class SearchPage:
             keyword=self.query_from_url(),
             expected_params=expected,
         )
+        self._wait_for_list_change(stale)
         assert self.current_page() == page_number
 
     def assert_empty_result(self, keyword: str) -> None:
