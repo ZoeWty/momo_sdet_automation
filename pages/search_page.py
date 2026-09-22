@@ -10,10 +10,12 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from parsers import Product, build_products, parse_product_identity, same_product
 
 
-BASE_URL = "https://www.momoshop.com.tw/"
-# Canonical result URL. The searchType/curPage/viewport triple is exactly what
+# Canonical result path. The searchType/curPage/viewport triple is exactly what
 # momo itself puts in the address bar when a result page is opened directly.
-RESULTS_URL = BASE_URL + "search/{keyword}?searchType=1&curPage=1&viewport=desktop&_isFuzzy=0"
+# The origin is injected (see the base_url fixture in conftest.py) so the site
+# under test is switched with --base-url or the PYTEST_BASE_URL environment
+# variable, never by editing code.
+RESULTS_PATH = "search/{keyword}?searchType=1&curPage=1&viewport=desktop&_isFuzzy=0"
 RESULT_TIMEOUT_MS = 30_000
 NAVIGATION_TIMEOUT_MS = 60_000
 PRICE_COMMIT_ATTEMPTS = 4
@@ -31,8 +33,9 @@ MIN_DESKTOP_WIDTH = 1024
 class SearchPage:
     """The user-facing search surface plus its result-completion contract."""
 
-    def __init__(self, page: Page) -> None:
+    def __init__(self, page: Page, base_url: str) -> None:
         self.page = page
+        self.base_url = base_url if base_url.endswith("/") else base_url + "/"
         page.set_default_timeout(15_000)
         page.set_default_navigation_timeout(NAVIGATION_TIMEOUT_MS)
 
@@ -65,6 +68,18 @@ class SearchPage:
         )
 
     @property
+    def price_min_input(self) -> Locator:
+        return self.page.locator("#priceS")
+
+    @property
+    def price_max_input(self) -> Locator:
+        return self.page.locator("#priceE")
+
+    @property
+    def price_confirm_button(self) -> Locator:
+        return self.page.locator("a.priceBtn[title='確認']")
+
+    @property
     def visible_pagination(self) -> Locator:
         return self.page.locator("ul.pagination:visible")
 
@@ -89,14 +104,15 @@ class SearchPage:
         """
         self._assert_desktop_viewport()
         self.page.goto(
-            RESULTS_URL.format(keyword=quote(keyword)), wait_until="domcontentloaded"
+            self.base_url + RESULTS_PATH.format(keyword=quote(keyword)),
+            wait_until="domcontentloaded",
         )
         self.page.wait_for_load_state("load", timeout=RESULT_TIMEOUT_MS)
         self._finish_update(keyword, {"searchType": "1", "curPage": "1"}, set())
 
     def open(self) -> None:
         self._assert_desktop_viewport()
-        self.page.goto(BASE_URL, wait_until="domcontentloaded")
+        self.page.goto(self.base_url, wait_until="domcontentloaded")
         # The header is visible before React has necessarily finished hydrating.
         # Waiting for the browser load event keeps an early click from being
         # handled by markup that is about to be replaced.
@@ -220,8 +236,8 @@ class SearchPage:
         sort = self.url_params().get("searchType", "1")
         self._commit_price_panel("", "", label="clear")
         self._finish_update(keyword, {"searchType": sort}, {"_advPriceS", "_advPriceE"})
-        expect(self.page.locator("#priceS")).to_have_value("")
-        expect(self.page.locator("#priceE")).to_have_value("")
+        expect(self.price_min_input).to_have_value("")
+        expect(self.price_max_input).to_have_value("")
 
     def _commit_price_panel(self, low: str, high: str, *, label: str) -> None:
         """Fill the range and press 確認 until the result set actually changes.
@@ -243,7 +259,7 @@ class SearchPage:
         before = self._page_summary()
         for attempt in range(1, PRICE_COMMIT_ATTEMPTS + 1):
             self._type_range(low, high)
-            self.page.locator("a.priceBtn[title='確認']").click()
+            self.price_confirm_button.click()
             try:
                 self.page.wait_for_function(
                     """before => {
@@ -300,8 +316,7 @@ class SearchPage:
         _advPrice parameters at all. Typing character by character and then
         blurring gives the component the input/change events it listens for.
         """
-        for selector, value in (("#priceS", low), ("#priceE", high)):
-            field = self.page.locator(selector)
+        for field, value in ((self.price_min_input, low), (self.price_max_input, high)):
             field.click()
             field.press("ControlOrMeta+a")
             if value:
@@ -309,7 +324,7 @@ class SearchPage:
             else:
                 field.press("Delete")
             expect(field).to_have_value(value)
-        self.page.locator("#priceE").blur()
+        self.price_max_input.blur()
 
     def _page_summary(self) -> str:
         """First non-empty '頁數N/M' label, used as a cheap result-set fingerprint."""
@@ -317,8 +332,8 @@ class SearchPage:
         return next((text.strip() for text in texts if text.strip()), "")
 
     def assert_price_filter_state(self, minimum: int, maximum: int) -> None:
-        expect(self.page.locator("#priceS")).to_have_value(str(minimum))
-        expect(self.page.locator("#priceE")).to_have_value(str(maximum))
+        expect(self.price_min_input).to_have_value(str(minimum))
+        expect(self.price_max_input).to_have_value(str(maximum))
         params = self.url_params()
         assert params.get("_advPriceS") == str(minimum)
         assert params.get("_advPriceE") == str(maximum)
@@ -380,31 +395,6 @@ class SearchPage:
             timeout=NAVIGATION_TIMEOUT_MS,
         )
         return source, destination_page
-
-    @staticmethod
-    def product_content(page: Page) -> tuple[str, str]:
-        identity = parse_product_identity(page.url)
-        if identity.namespace == "catalog":
-            container = page.locator("[data-testid='goods-info']")
-            name = page.locator("[data-testid='goods-name-content']")
-            price = page.locator("[data-testid='web-goods-price-container']")
-        else:
-            container = page.locator("main:visible")
-            name = page.locator("meta[property='og:title']")
-            price = page.locator(".goods-detail-price:visible")
-
-        expect(container).to_be_visible(timeout=NAVIGATION_TIMEOUT_MS)
-        if identity.namespace == "catalog":
-            expect(name).to_be_visible()
-            name_text = name.inner_text().strip()
-        else:
-            expect(name).to_have_count(1)
-            name_text = (name.get_attribute("content") or "").strip()
-        expect(price).to_be_visible()
-        price_text = price.inner_text().strip()
-        assert name_text, "product name is empty"
-        assert re.search(r"\d", price_text), f"product price is missing: {price_text!r}"
-        return name_text, price_text
 
     def _perform_update(
         self,

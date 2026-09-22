@@ -1,12 +1,12 @@
 import pytest
 
+from pages.product_page import ProductPage
 from pages.search_page import SearchPage
 from parsers import (
     assert_disjoint,
     assert_prices_in_range,
     assert_prices_sorted,
     assert_relevant,
-    parse_product_identity,
     same_product,
 )
 
@@ -21,8 +21,8 @@ MIN_RELEVANCE = 0.7
 
 
 @pytest.fixture
-def search_page(page):
-    return SearchPage(page)
+def search_page(page, base_url):
+    return SearchPage(page, base_url)
 
 
 @pytest.mark.smoke
@@ -104,9 +104,10 @@ def test_mm_fh_06_product_card_hands_off_to_matching_product_page(search_page):
     search_page.open_results(KEYWORD)
 
     source, destination_page = search_page.open_first_organic_product()
-    destination = parse_product_identity(destination_page.url)
-    assert same_product(source.identity, destination)
-    name, price = search_page.product_content(destination_page)
+
+    product_page = ProductPage(destination_page)
+    assert same_product(source.identity, product_page.identity)
+    name, price = product_page.content()
     assert name
     assert price
 

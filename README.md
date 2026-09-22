@@ -14,8 +14,9 @@ follows from that.
 | of which P0 smoke | 7 | ~45 s | yes |
 
 **Stability evidence:** three consecutive full runs on 2026-09-22 —
-`48 passed` / `48 passed` / `48 passed`, 79–82 s each, **zero retries and
-zero reruns**. Samples from one machine on one day, not a guarantee.
+`48 passed` / `48 passed` / `48 passed`, 72–82 s each, **zero retries and
+zero reruns**. Samples from one machine on one day, not a guarantee; the CI
+table below covers a different machine, geography and interpreter.
 
 ## Setup
 
@@ -50,7 +51,14 @@ python -m pytest
 ```
 
 Add `--headed` for a live demo. Defaults are Chromium, a single worker and
-zero retries. Failures keep a screenshot and a trace under `test-results/`:
+zero retries. The site under test is not hardcoded — switch it without
+touching code:
+
+```bash
+python -m pytest --base-url https://www.momoshop.com.tw/
+PYTEST_BASE_URL=https://www.momoshop.com.tw/ python -m pytest
+```
+ Failures keep a screenshot and a trace under `test-results/`:
 
 ```bash
 python -m playwright show-trace test-results/<trace-file>.zip
@@ -75,6 +83,11 @@ and `MM-NE-01` (three timing samples). There is no product SLA, so timings are
 reported as samples, never graded.
 
 ## Design decisions worth knowing before reading the code
+
+**One page object per page.** `SearchPage` owns the search box and the result
+page; `ProductPage` owns the product detail page, including the branch between
+momo's two detail templates. A change to the product page does not touch the
+search page object, and neither object leaks a selector into a test.
 
 **Ads are excluded before any ordering or range assertion.** Roughly 6 of 30
 cards are sponsored (`.sponsor-tag` / `ins.tenMaxAdTag`), they sit at the top,

@@ -1,6 +1,9 @@
 import pytest
 
 
+DEFAULT_BASE_URL = "https://www.momoshop.com.tw/"
+
+
 @pytest.fixture(scope="session")
 def browser_context_args(browser_context_args: dict) -> dict:
     """Desktop conditions from the test plan.
@@ -16,3 +19,16 @@ def browser_context_args(browser_context_args: dict) -> dict:
         "locale": "zh-TW",
         "viewport": {"width": 1440, "height": 900},
     }
+
+
+@pytest.fixture(scope="session")
+def base_url(base_url: str | None) -> str:
+    """Origin of the site under test.
+
+    Overrides pytest-base-url's fixture only to supply a default, so a bare
+    `pytest` still runs. The site is switched without touching code:
+
+        pytest --base-url https://www.momoshop.com.tw/
+        PYTEST_BASE_URL=... pytest
+    """
+    return base_url or DEFAULT_BASE_URL
