@@ -110,6 +110,22 @@ the product for working properly. The gate exists to catch a collapsed ranker.
 mean the network never goes idle. Every wait is a bounded condition on
 something the user can see.
 
+## CI
+
+| Job | Trigger | Scope | Verified on a remote runner |
+|---|---|---|---|
+| `offline helpers` | every push / PR | `tests/test_parsers.py` — no browser, no network | **yes** — [run #1](https://github.com/ZoeWty/momo_sdet_automation/actions/runs/35636669977), `success` on `ubuntu-latest` / Python 3.13, 17 s |
+| `live smoke (manual)` | `workflow_dispatch` only | `pytest -m smoke` — the 7 P0 executions, against production | <!-- SMOKE_RUN -->**not yet** |
+
+The live smoke is deliberately **not** scheduled. The target is a production
+site we do not own, so a recurring job against it is not ours to start — the
+offline helpers carry the automatic gate instead.
+
+On the push-triggered run, `live smoke (manual)` reported `skipped`, which is
+exactly what its `workflow_dispatch` condition is for. Until the row above says
+otherwise, the local green runs in *Stability evidence* are the only evidence
+for the UI layer, and "CI verified" is claimed only for the offline helpers.
+
 ## Known limits
 
 - Products, ads, stock and campaigns change. Nothing pins product counts,
@@ -122,6 +138,3 @@ something the user can see.
 - `MM-FH-06` exercises one product's URL family per run. The helpers cover
   `GoodsDetail.jsp`, the `/product/{id}` alias and `/TP/.../goodsDetail/...`
   identity parsing; the suite does not claim all three page types ran E2E.
-- CI runs the offline helpers on every push. The live smoke stays behind
-  `workflow_dispatch` rather than a schedule, because the target is a
-  production site we do not own.
