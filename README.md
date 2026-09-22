@@ -115,16 +115,19 @@ something the user can see.
 | Job | Trigger | Scope | Verified on a remote runner |
 |---|---|---|---|
 | `offline helpers` | every push / PR | `tests/test_parsers.py` — no browser, no network | **yes** — [run #1](https://github.com/ZoeWty/momo_sdet_automation/actions/runs/35636669977), `success` on `ubuntu-latest` / Python 3.13, 17 s |
-| `live smoke (manual)` | `workflow_dispatch` only | `pytest -m smoke` — the 7 P0 executions, against production | <!-- SMOKE_RUN -->**not yet** |
+| `live smoke (manual)` | `workflow_dispatch` only | `pytest -m smoke` — the 7 P0 executions, against production | **yes** — [run #3](https://github.com/ZoeWty/momo_sdet_automation/actions/runs/35686824709), `success` in 129 s |
 
 The live smoke is deliberately **not** scheduled. The target is a production
 site we do not own, so a recurring job against it is not ours to start — the
 offline helpers carry the automatic gate instead.
 
-On the push-triggered run, `live smoke (manual)` reported `skipped`, which is
-exactly what its `workflow_dispatch` condition is for. Until the row above says
-otherwise, the local green runs in *Stability evidence* are the only evidence
-for the UI layer, and "CI verified" is claimed only for the offline helpers.
+On push-triggered runs, `live smoke (manual)` reports `skipped`, which is
+exactly what its `workflow_dispatch` condition is for.
+
+The P0 smoke passing on a GitHub-hosted **US** runner, against a Taiwanese
+production site, on **Python 3.13** rather than the 3.14 used locally, is a
+stronger result than the local runs alone: the waiting contract described above
+is not tuned to one laptop's timing, one interpreter or one network path.
 
 ## Known limits
 
